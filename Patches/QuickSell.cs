@@ -1,27 +1,25 @@
-﻿using EFT;
-using EFT.UI;
-using UnityEngine;
+using Comfort.Common;
+using EFT;
+using EFT.Hideout;
 using EFT.InventoryLogic;
-using HarmonyLib;
-using QuickSell;
+using EFT.Trading;
+using EFT.UI;
+using EFT.UI.Ragfair;
+using JetBrains.Annotations;
 using SPT.Reflection.Patching;
+using SPT.Reflection.Utils;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Comfort.Common;
-using EFT.UI.Ragfair;
 using TMPro;
-using SPT.Reflection.Utils;
 using UIFixesInterop;
-using EFT.Hideout;
-using JetBrains.Annotations;
+using UnityEngine;
 
 namespace QuickSell.Patches
 {
     // This is the main patch handling most of the logic
-
-    internal class ContextMenuPatch : ModulePatch // all patches must inherit ModulePatch
+    internal class ContextMenuPatch : ModulePatch
     {
         private static TraderClass[] traders = null;
 
@@ -40,10 +38,10 @@ namespace QuickSell.Patches
             }
 
             var fieldInfo = typeof(TarkovApplication)
-                .GetField("_menuOperation", BindingFlags.NonPublic | BindingFlags.Instance);
+                .GetField("mainMenuControllerClass", BindingFlags.NonPublic | BindingFlags.Instance);
             if (fieldInfo == null)
             {
-                Utils.SendError("Field '_menuOperation' not found in TarkovApplication");
+                Utils.SendError("Field 'mainMenuControllerClass' not found in TarkovApplication");
                 return null;
             }
 
@@ -56,7 +54,6 @@ namespace QuickSell.Patches
             return mainMenuController;
         }
 
-
         private static ISession GetSession()
         {
             var mainMenuController = GetMainMenu();
@@ -66,10 +63,10 @@ namespace QuickSell.Patches
                 return null;
             }
 
-            var session = mainMenuController.iSession;
+            var session = mainMenuController.ISession;
             if (session == null)
             {
-                Utils.SendError("iSession is null");
+                Utils.SendError("ISession is null");
             }
 
             return session;
@@ -77,46 +74,37 @@ namespace QuickSell.Patches
 
         protected override MethodBase GetTargetMethod()
         {
-            // Retrieve method info for method_0 on SimpleContextMenu
-            var methodInfo = typeof(SimpleContextMenu).GetMethod(nameof(SimpleContextMenu.method_0));
+            var methodInfo = typeof(SimpleContextMenu).GetMethod(
+                "method_0",
+                BindingFlags.Public | BindingFlags.Instance);
+
             if (methodInfo == null)
             {
                 Utils.SendError("SimpleContextMenu.method_0 not found");
                 return null;
             }
 
-            // Create a generic method with the specified type parameter
-            var targetMethod = methodInfo.MakeGenericMethod(typeof(EItemInfoButton));
-
-            return targetMethod;
+            return methodInfo.MakeGenericMethod(typeof(EItemInfoButton));
         }
 
         [CanBeNull]
         private static ITraderInteractions GetTraderInteractions(TraderClass bestTrader)
         {
-            ITraderInteractions interactions = null;
-
-            var fieldInfo = typeof(TraderClass)
-                .GetField("iTraderInteractions", BindingFlags.NonPublic | BindingFlags.Instance);
-            
-            if (fieldInfo != null)
+            var interactions = bestTrader.ITraderInteractions;
+            if (interactions == null)
             {
-                interactions = fieldInfo.GetValue(bestTrader) as ITraderInteractions;
-                if (interactions == null)
-                {
-                    Utils.SendError("iTraderInteractions is null for the provided trader instance");
-                }
+                Utils.SendError("ITraderInteractions is null for the provided trader instance");
             }
-            
+
             return interactions;
         }
 
-
         [PatchPrefix]
-        private static void Prefix(ItemInfoInteractionsAbstractClass<EItemInfoButton> contextInteractions,
-            IReadOnlyDictionary<EItemInfoButton, string> names, Item item)
+        private static void Prefix(
+            ItemInfoInteractionsAbstractClass<EItemInfoButton> contextInteractions,
+            Item item)
         {
-            if (contextInteractions is not GClass3466 gclass) return;
+            if (contextInteractions is not GClass3758) return;
 
             if (item == null)
             {
@@ -124,39 +112,82 @@ namespace QuickSell.Patches
                 return;
             }
 
-            ItemContextAbstractClass itemContext = Traverse.Create(contextInteractions)
-                .Field<ItemContextAbstractClass>("itemContextAbstractClass").Value;
-            if (itemContext.ViewType != EItemViewType.Inventory) return;
+            var itemContext = (contextInteractions as ContextInteractionsAbstractClass)?.ItemContextAbstractClass;
+            if (itemContext == null || itemContext.ViewType != EItemViewType.Inventory) return;
             if (Singleton<GameWorld>.Instantiated && Singleton<GameWorld>.Instance is not HideoutGameWorld) return;
-            if (Singleton<MenuUI>.Instance.HideoutAreaTransferItemsScreen.isActiveAndEnabled) return;
-
+            if (Singleton<MenuUI>.Instantiated &&
+                Singleton<MenuUI>.Instance.HideoutAreaTransferItemsScreen != null &&
+                Singleton<MenuUI>.Instance.HideoutAreaTransferItemsScreen.isActiveAndEnabled) return;
             if (item.GetAllParentItems().Any(x => x is InventoryEquipment)) return;
-
             if (item.Parent.Container.ParentItem.TemplateId == "55d7217a4bdc2d86028b456d") return;
 
-            Dictionary<string, DynamicInteractionClass> dynamicInteractions = Traverse.Create(contextInteractions)
-                .Field<Dictionary<string, DynamicInteractionClass>>("dictionary_0").Value;
+            var dynamicInteractions = contextInteractions.Dictionary_0;
             if (dynamicInteractions is null) return;
 
+            var unloadSprite = CacheResourcesPopAbstractClass.Pop<Sprite>("Characteristics/Icons/UnloadAmmo");
+
             if (Plugin.EnableQuickSellFlea)
-                dynamicInteractions["QuickSell (Flea)"] = new("QuickSell (Flea)", "QuickSell (Flea)",
-                    () => ConfirmWindow((i) => UIFixesHandler((i) => SellFlea(i), i), "on the flea", item),
-                    CacheResourcesPopAbstractClass.Pop<Sprite>("Characteristics/Icons/UnloadAmmo"));
+            {
+                dynamicInteractions["QuickSell (Flea)"] = new DynamicInteractionClass(
+                    "QuickSell (Flea)",
+                    "QuickSell (Flea)",
+                    () => SellToFlea(item),
+                    unloadSprite);
+            }
+
             if (Plugin.EnableQuickSellTraders)
-                dynamicInteractions["QuickSell (Trader)"] = new("QuickSell (Trader)", "QuickSell (Trader)",
-                    () => ConfirmWindow((i) => UIFixesHandler((i) => SellTrader(i), i), "to the traders", item),
-                    CacheResourcesPopAbstractClass.Pop<Sprite>("Characteristics/Icons/UnloadAmmo"));
+            {
+                dynamicInteractions["QuickSell (Trader)"] = new DynamicInteractionClass(
+                    "QuickSell (Trader)",
+                    "QuickSell (Trader)",
+                    () => SellToTraders(item),
+                    unloadSprite);
+            }
         }
 
-        public static void ConfirmWindow(Action<Item> callback, string source, Item item)
+        public static void SellToTraders(Item item)
         {
-            if (Plugin.ShowConfirmationDialog)
+            var items = GetItemsToSell(item);
+            var validItems = new List<Item>();
+            var total = 0;
+            foreach (var i in items)
             {
-                ItemUiContext.Instance.ShowMessageWindow(
-                    $"Are you sure you want to sell this item {source}".Localized(),
-                    () => callback(item), () => { }, null, 0f, false, TextAlignmentOptions.Center);
+                var bestTrader = SelectTrader(i);
+                if (bestTrader != null && bestTrader.GetUserItemPrice(i) is { } p)
+                {
+                    validItems.Add(i);
+                    total += p.Amount;
+                }
             }
-            else callback(item);
+            if (validItems.Count == 0)
+            {
+                Utils.SendError("No items can be sold to traders");
+                return;
+            }
+            var validIds = new HashSet<string>(validItems.Select(i => i.Id));
+            ConfirmWindow(
+                () =>
+                {
+                    if (IsMultiSelectActive())
+                    {
+                        MultiSelect.Apply(i =>
+                        {
+                            if (i != null && validIds.Contains(i.Id))
+                            {
+                                SellTrader(i);
+                            }
+                        }, ItemUiContext.Instance);
+                        return;
+                    }
+
+                    foreach (var i in validItems)
+                    {
+                        SellTrader(i);
+                    }
+                },
+                "to the traders",
+                validItems.Count,
+                total);
         }
 
         public static void SellTrader(Item item)
@@ -164,7 +195,6 @@ namespace QuickSell.Patches
             try
             {
                 var bestTrader = SelectTrader(item);
-
                 if (bestTrader == null)
                 {
                     Utils.SendError("Item cannot be sold traders");
@@ -172,22 +202,20 @@ namespace QuickSell.Patches
                 }
 
                 var price = bestTrader.GetUserItemPrice(item).Value.Amount;
-
                 Utils.SendNotification($"Profit: {price}");
 
-                ITraderInteractions interactions = bestTrader.iTraderInteractions;
-
+                var interactions = GetTraderInteractions(bestTrader);
                 if (interactions is null)
                 {
                     Utils.SendError("Failed to get trader interactions");
                     return;
                 }
-                
+
                 interactions.ConfirmSell(
                     bestTrader.Id,
-                    [new EFT.Trading.TradingItemReference { Item = item, Count = item.StackObjectsCount }], 
-                    price, 
-                    PlaySellSound
+                    [new TradingItemReference { Item = item, Count = item.StackObjectsCount }],
+                    price,
+                    new Callback(PlaySellSound)
                 );
             }
             catch (Exception ex)
@@ -197,46 +225,115 @@ namespace QuickSell.Patches
             }
         }
 
-        public static void SellFlea(Item item)
+        public static void SellToFlea(Item item)
         {
+            var items = GetItemsToSell(item);
             try
             {
-                var tradingScreen = Singleton<MenuUI>.Instance.TradingScreen;
-                if (!tradingScreen) Utils.SendError("Could not Load tradingScreen");
-
+                if (!Singleton<MenuUI>.Instantiated || Singleton<MenuUI>.Instance?.TradingScreen == null)
+                {
+                    Utils.SendError("MenuUI is not available");
+                    return;
+                }
                 var session = GetSession();
-                if (session == null) Utils.SendError("Could not Load session");
-
-                var inventoryControllerClass = GetMainMenu().InventoryController;
-                if (inventoryControllerClass == null) Utils.SendError("Counldnt Load inventoryControllerClass");
-
-                var ragFairClass = GetSession().RagFair;
+                if (session == null) return;
+                var mainMenu = GetMainMenu();
+                if (mainMenu == null) return;
+                var inventoryController = mainMenu.InventoryController;
+                if (inventoryController == null || inventoryController is not TraderControllerClass traderController)
+                {
+                    Utils.SendError("Could not load inventory");
+                    return;
+                }
+                var ragFairClass = session.RagFair;
                 if (!ragFairClass.Available)
                 {
                     Utils.SendError("Flea market is not available");
                     return;
                 }
-
-                var lootItemClass = new CompoundItem[] { inventoryControllerClass.Inventory.Stash };
-                var helper = new RagfairOfferSellHelperClass(lootItemClass[0].Grids[0], inventoryControllerClass);
-                if (!helper.HighlightedAtRagfair(item))
+                var helper = new RagfairOfferSellHelperClass(inventoryController.Inventory.Stash.Grids[0], traderController);
+                var validItems = items.Where(i => helper.HighlightedAtRagfair(i)).ToList();
+                if (validItems.Count == 0)
                 {
-                    Utils.SendError("Item cannot be sold on the flea");
+                    Utils.SendError("No items can be sold on the flea");
                     return;
                 }
-
-
-                var max_offers = ragFairClass.GetMaxOffersCount(ragFairClass.MyRating);
-                var current_offers = ragFairClass.MyOffersCount;
-
-                if (!Plugin.IgnoreFleaCapacity && current_offers == max_offers)
+                var maxOffers = ragFairClass.GetMaxOffersCount(ragFairClass.MyRating);
+                var currentOffers = ragFairClass.MyOffersCount;
+                if (!Plugin.IgnoreFleaCapacity && currentOffers + validItems.Count > maxOffers)
                 {
-                    Utils.SendError("You have reached the maximum number of offers");
+                    Utils.SendError("Not enough flea offer slots");
                     return;
                 }
+                if (validItems.Count == 1)
+                {
+                    var single = validItems[0];
+                    ragFairClass.GetMarketPrices(single.TemplateId, (ItemMarketPrices result) =>
+                    {
+                        try
+                        {
+                            var price = (int)Math.Ceiling(result.avg / 100.0 * Plugin.AvgPricePercent);
+                            ConfirmWindow(() => DoFleaOffer(single, session, price), "on the flea", 1, price);
+                        }
+                        catch (Exception ex)
+                        {
+                            Utils.SendError(ex.ToString());
+                            Plugin.LogSource.LogWarning(ex.ToString());
+                        }
+                    });
+                    return;
+                }
+                var pending = validItems.Count;
+                var prices = new Dictionary<string, int>();
+                var lockObj = new object();
+                foreach (var i in validItems)
+                {
+                    ragFairClass.GetMarketPrices(i.TemplateId, (ItemMarketPrices result) =>
+                    {
+                        lock (lockObj)
+                        {
+                            try
+                            {
+                                prices[i.Id] = (int)Math.Ceiling(result.avg / 100.0 * Plugin.AvgPricePercent);
+                                if (--pending == 0)
+                                {
+                                    var total = prices.Values.Sum();
+                                    ConfirmWindow(
+                                        () =>
+                                        {
+                                            if (IsMultiSelectActive())
+                                            {
+                                                MultiSelect.Apply(selectedItem =>
+                                                {
+                                                    if (selectedItem != null && prices.TryGetValue(selectedItem.Id, out var price))
+                                                    {
+                                                        DoFleaOffer(selectedItem, session, price);
+                                                    }
+                                                }, ItemUiContext.Instance);
+                                                return;
+                                            }
 
-                var fleaAction = FleaCallbackFactory(item, ragFairClass, session);
-                ragFairClass.GetMarketPrices(item.TemplateId, fleaAction);
+                                            foreach (var validItem in validItems)
+                                            {
+                                                if (prices.TryGetValue(validItem.Id, out var price))
+                                                {
+                                                    DoFleaOffer(validItem, session, price);
+                                                }
+                                            }
+                                        },
+                                        "on the flea",
+                                        prices.Count,
+                                        total);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Utils.SendError(ex.ToString());
+                                Plugin.LogSource.LogWarning(ex.ToString());
+                            }
+                        }
+                    });
+                }
             }
             catch (Exception ex)
             {
@@ -245,62 +342,48 @@ namespace QuickSell.Patches
             }
         }
 
-        public static Action<ItemMarketPrices> FleaCallbackFactory(Item item, RagFairClass ragFair, ISession session)
+        private static void DoFleaOffer(Item item, ISession session, int price)
         {
-            void res(ItemMarketPrices result)
+            try
             {
-                try
+                var list = new List<GClass2335>
                 {
-                    List<GClass2102> list =
-                    [
-                        new()
-                        {
-                            _tpl = GClass2934.GetCurrencyId(ECurrencyType.RUB),
-                            count = Math.Ceiling(result.avg / 100.0 * Plugin.AvgPricePercent), onlyFunctional = true
-                        },
-                    ];
-
-
-                    session.RagfairAddOffer(false, [item.Id], [.. list], new Callback(PlaySellSound));
-                }
-                catch (Exception ex)
-                {
-                    Utils.SendError(ex.ToString());
-                    Plugin.LogSource.LogWarning(ex.ToString());
-                }
+                    new()
+                    {
+                        _tpl = (string)GClass3130.GetCurrencyId(ECurrencyType.RUB),
+                        count = price,
+                        onlyFunctional = true
+                    }
+                };
+                session.RagfairAddOffer(false, [item.Id], [.. list], new Callback(PlaySellSound));
             }
-
-            return res;
+            catch (Exception ex)
+            {
+                Utils.SendError(ex.ToString());
+                Plugin.LogSource.LogWarning(ex.ToString());
+            }
         }
 
         private static SupplyData GetTraderSupplyData()
         {
-            SupplyData supplyData = null;
-
-            var trader = traders.First();
+            var trader = traders?.FirstOrDefault();
             if (trader == null)
             {
                 Utils.SendError("No trader found in the collection.");
+                return null;
             }
-            else
+
+            var supplyData = trader.SupplyData_0;
+            if (supplyData == null)
             {
-                var fieldInfo = typeof(TraderClass)
-                    .GetField("supplyData_0", BindingFlags.NonPublic | BindingFlags.Instance);
-                if (fieldInfo != null)
-                {
-                    supplyData = fieldInfo.GetValue(trader) as SupplyData;
-                    if (supplyData == null)
-                    {
-                        Utils.SendError("supplyData_0 is null for the provided trader instance.");
-                    }
-                }
+                Utils.SendError("SupplyData_0 is null for the provided trader instance.");
             }
 
             return supplyData;
         }
 
         // Returns Trader with best offer of null if unsellable
-        private static TraderClass SelectTrader(Item item)
+        internal static TraderClass SelectTrader(Item item)
         {
             if (traders == null)
             {
@@ -315,20 +398,20 @@ namespace QuickSell.Patches
 
             TraderClass best = null;
             int bestOffer = 0;
-            
+
             if (traders == null)
             {
                 Utils.SendError("Traders is null even after force reloading. Cannot sell.");
                 return null;
             }
-            
+
             foreach (var trader in traders)
             {
                 if (Plugin.TradersBlacklist.Contains(trader.LocalizedName)) continue;
 
                 var price = trader.GetUserItemPrice(item);
-
                 if (price == null) continue;
+
                 if (best == null)
                 {
                     best = trader;
@@ -342,53 +425,62 @@ namespace QuickSell.Patches
                     bestOffer = price.Value.Amount;
                 }
             }
-            
+
             return best;
         }
 
         private static void PlaySellSound(IResult result)
         {
-            if (result.Succeed) Singleton<GUISounds>.Instance.PlayUISound(EUISoundType.TradeOperationComplete);
+            if (result.Succeed)
+            {
+                Singleton<GUISounds>.Instance.PlayUISound(EUISoundType.TradeOperationComplete);
+            }
         }
 
         private static void ForceReloadTraders()
         {
-            traders = GetSession().Traders
-                    /*
-                     * Look for return !trader.Settings.AvailableInRaid; in MainMenuControllerClass in dnspy
-                     */
-                .Where(MainMenuControllerClass.Class1394.class1394_0.method_4)
+            var session = GetSession();
+            if (session == null)
+            {
+                traders = null;
+                return;
+            }
+
+            traders = session.Traders
+                .Where(trader => !trader.Settings.AvailableInRaid)
                 .ToArray();
         }
 
-        public static void UIFixesHandler(Action<Item> callback, Item item)
+        private static bool IsMultiSelectActive()
         {
-            Utils.SendDebugNotification("Enabled: " + Plugin.EnableUIFixesIntegration);
-            Utils.SendDebugNotification("Count : " + MultiSelect.Count);
-
-            if (item == null) return;
-            if (!Plugin.EnableUIFixesIntegration)
-            {
-                callback(item);
-                return;
-            }
-
-            if (MultiSelect.Count <= 1)
-            {
-                callback(item);
-                return;
-            }
-
-            if (!MultiSelect.Items.Contains(item))
-            {
-                callback(item);
-                return;
-            }
-
-
-            MultiSelect.Apply((i) => Utils.SendDebugNotification("Selected item: " + i.Id), ItemUiContext.Instance);
-
-            MultiSelect.Apply((i) => callback(i), ItemUiContext.Instance);
+            return Plugin.EnableUIFixesIntegration && MultiSelect.Count > 0;
         }
+
+        /// <summary>
+        /// Returns the items to operate on: multi-selection if UIFixes has multiple items selected and item is in that selection, otherwise just the single item.
+        /// </summary>
+        internal static List<Item> GetItemsToSell(Item item)
+        {
+            if (item == null) return new List<Item>();
+            if (!Plugin.EnableUIFixesIntegration) return new List<Item> { item };
+            if (MultiSelect.Count > 0) return MultiSelect.Items.ToList();
+            return new List<Item> { item };
+        }
+
+        public static void ConfirmWindow(Action callback, string source, int count, int? totalPrice = null)
+        {
+            if (!Plugin.ShowConfirmationDialog) { callback(); return; }
+            var itemUiContext = ItemUiContext.Instance;
+            if (itemUiContext == null) { callback(); return; }
+            var message = count == 1
+                ? (totalPrice.HasValue
+                    ? $"Are you sure you want to sell this item {source} for {totalPrice.Value:N0} ₽?".Localized()
+                    : $"Are you sure you want to sell this item {source}".Localized())
+                : (totalPrice.HasValue
+                    ? $"Are you sure you want to sell {count} items {source} for {totalPrice.Value:N0} ₽ total?".Localized()
+                    : $"Are you sure you want to sell {count} items {source}".Localized());
+            itemUiContext.ShowMessageWindow(message, callback, () => { }, null, 0f, false, TextAlignmentOptions.Center);
+        }
+
     }
 }
