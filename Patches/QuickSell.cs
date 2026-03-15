@@ -273,7 +273,8 @@ namespace QuickSell.Patches
                         try
                         {
                             var price = (int)Math.Ceiling(result.avg / 100.0 * Plugin.AvgPricePercent);
-                            ConfirmWindow(() => DoFleaOffer(single, session, price), "on the flea", 1, price);
+                            var fee = (int)Math.Ceiling(FleaTaxCalculatorAbstractClass.CalculateTaxPrice(single, single.StackObjectsCount, price, false));
+                            ConfirmWindow(() => DoFleaOffer(single, session, price), "on the flea", 1, price * single.StackObjectsCount, fee);
                         }
                         catch (Exception ex)
                         {
@@ -297,7 +298,8 @@ namespace QuickSell.Patches
                                 prices[i.Id] = (int)Math.Ceiling(result.avg / 100.0 * Plugin.AvgPricePercent);
                                 if (--pending == 0)
                                 {
-                                    var total = prices.Values.Sum();
+                                    var total = validItems.Sum(v => prices[v.Id] * v.StackObjectsCount);
+                                    var totalFee = validItems.Sum(v => (int)Math.Ceiling(FleaTaxCalculatorAbstractClass.CalculateTaxPrice(v, v.StackObjectsCount, prices[v.Id], false)));
                                     ConfirmWindow(
                                         () =>
                                         {
@@ -323,7 +325,8 @@ namespace QuickSell.Patches
                                         },
                                         "on the flea",
                                         prices.Count,
-                                        total);
+                                        total,
+                                        totalFee);
                                 }
                             }
                             catch (Exception ex)
@@ -467,18 +470,36 @@ namespace QuickSell.Patches
             return new List<Item> { item };
         }
 
-        public static void ConfirmWindow(Action callback, string source, int count, int? totalPrice = null)
+        public static void ConfirmWindow(Action callback, string source, int count, int? totalPrice = null, int? fee = null)
         {
             if (!Plugin.ShowConfirmationDialog) { callback(); return; }
             var itemUiContext = ItemUiContext.Instance;
             if (itemUiContext == null) { callback(); return; }
-            var message = count == 1
-                ? (totalPrice.HasValue
-                    ? $"Are you sure you want to sell this item {source} for {totalPrice.Value:N0} ₽?".Localized()
-                    : $"Are you sure you want to sell this item {source}".Localized())
-                : (totalPrice.HasValue
-                    ? $"Are you sure you want to sell {count} items {source} for {totalPrice.Value:N0} ₽ total?".Localized()
-                    : $"Are you sure you want to sell {count} items {source}".Localized());
+
+            string message;
+            string baseMsg = count == 1
+                ? $"Are you sure you want to sell this item {source}?".Localized()
+                : $"Are you sure you want to sell {count} items {source}?".Localized();
+
+            if (totalPrice.HasValue)
+            {
+                if (fee.HasValue && fee.Value > 0)
+                {
+                    var profit = totalPrice.Value - fee.Value;
+                    message = $"{baseMsg}\n\nListing Fee: {fee.Value:N0} ₽\nNet Profit: {profit:N0} ₽";
+                }
+                else
+                {
+                    message = count == 1
+                        ? $"Are you sure you want to sell this item {source} for {totalPrice.Value:N0} ₽?".Localized()
+                        : $"Are you sure you want to sell {count} items {source} for {totalPrice.Value:N0} ₽ total?".Localized();
+                }
+            }
+            else
+            {
+                message = baseMsg;
+            }
+
             itemUiContext.ShowMessageWindow(message, callback, () => { }, null, 0f, false, TextAlignmentOptions.Center);
         }
 
