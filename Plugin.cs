@@ -1,18 +1,13 @@
-﻿using BepInEx;
+using BepInEx;
+using BepInEx.Bootstrap;
 using BepInEx.Logging;
 using EFT;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using QuickSell.Patches;
 using System.IO;
-using EFT.Communications;
 using Newtonsoft.Json.Linq;
 using BepInEx.Configuration;
 using UnityEngine;
-using UIFixesInterop;
 
 namespace QuickSell
 {
@@ -21,6 +16,8 @@ namespace QuickSell
     [BepInDependency("Tyfon.UIFixes", BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
+        private static readonly Version UIFixesMinimumVersion = new(2, 5);
+        private const string UIFixesPluginId = "Tyfon.UIFixes";
 
         public static bool EnableQuickSellFlea = true;
         public static bool EnableQuickSellTraders = true;
@@ -30,22 +27,17 @@ namespace QuickSell
 
         public static double AvgPricePercent = 100;
 
-        public static string TraderSellKey = "B";
-        public static string FleaSellKey = "N";
-
         public static bool IgnoreFleaCapacity = false;
-
-        public static bool Debug = false;
 
         public static bool DisableKeybinds = false;
 
         public static bool EnableUIFixesIntegration = false;
+        public static bool UIFixesDetected =>
+            Chainloader.PluginInfos.TryGetValue(UIFixesPluginId, out var pluginInfo) &&
+            pluginInfo?.Metadata?.Version >= UIFixesMinimumVersion;
 
         internal static ConfigEntry<KeyboardShortcut> KeybindTraders;
         internal static ConfigEntry<KeyboardShortcut> KeybindFlea;
-
-        private static GameObject Hook = new GameObject("QuickSell Hook");
-
 
         public static ManualLogSource LogSource;
 
@@ -57,34 +49,46 @@ namespace QuickSell
 
             try
             {
-                var modPath = Path.GetDirectoryName(System.Reflection.Assembly.GetAssembly(typeof(Plugin)).Location);
+                var modPath = Path.GetDirectoryName(typeof(Plugin).Assembly.Location);
+                if (!string.IsNullOrEmpty(modPath))
+                {
+                    LoadConfig(modPath.Replace('\\', '/'));
+                }
+                else
+                {
+                    Logger.LogWarning("Could not determine plugin path, using defaults");
+                    EnableUIFixesIntegration = UIFixesDetected;
+                }
 
-                modPath.Replace('\\', '/');
-
-                LoadConfig(modPath);
-
+                Logger.LogInfo(UIFixesDetected
+                    ? $"UIFixes detected, multi-select integration {(EnableUIFixesIntegration ? "enabled" : "disabled in config")}"
+                    : "UIFixes not found, multi-select integration disabled");
 
                 if (!DisableKeybinds)
                 {
                     KeybindFlea = Config.Bind("QuickSell", "SellFlea", new KeyboardShortcut(KeyCode.N), "Quicksell on the Flea");
                     KeybindTraders = Config.Bind("QuickSell", "SellTraders", new KeyboardShortcut(KeyCode.M), "QuickSell to Traders");
-
-                    Hook.AddComponent<ConfigController>();
-                    DontDestroyOnLoad(Hook);
+                    KeybindPatches.Enable();
                 }
-               
             }
             catch (Exception e)
             {
                 Logger.LogError(e);
             }
-             
+
         }
 
         private void LoadConfig(string path)
         {
+            var configPath = Path.Combine(path, "config.json");
+            if (!File.Exists(configPath))
+            {
+                Logger.LogWarning("config.json not found, using defaults");
+                EnableUIFixesIntegration = UIFixesDetected;
+                return;
+            }
 
-            var config = JObject.Parse(File.ReadAllText(path + "/config.json"));
+            var config = JObject.Parse(File.ReadAllText(configPath));
 
             Logger.LogInfo("Loading config");
 
@@ -118,11 +122,6 @@ namespace QuickSell
                 IgnoreFleaCapacity = (bool)config["IgnoreFleaCapacity"];
             }
 
-            if (config.ContainsKey("Debug"))
-            {
-                Debug = (bool)config["Debug"];
-            }
-
             if (config.ContainsKey("DisableKeybinds"))
             {
                 DisableKeybinds = (bool)config["DisableKeybinds"];
@@ -131,6 +130,10 @@ namespace QuickSell
             if (config.ContainsKey("EnableUIFixesIntegration"))
             {
                 EnableUIFixesIntegration = (bool)config["EnableUIFixesIntegration"];
+            }
+            else
+            {
+                EnableUIFixesIntegration = UIFixesDetected;
             }
         }
     }
